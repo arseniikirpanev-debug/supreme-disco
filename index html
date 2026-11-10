@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Amogus 2D Ultra-Light</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; -webkit-user-select: none; touch-action: none; }
+        body, html { margin: 0; padding: 0; overflow: hidden; background-color: #0c0f12; font-family: sans-serif; width: 100%; height: 100%; }
+        #canvas-container { position: relative; width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; background-color: #111; }
+        .hud-panel { position: absolute; top: 20px; left: 20px; color: #fff; font-weight: bold; font-size: 15px; background: rgba(0,0,0,0.8); padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); line-height: 1.5; z-index: 10; pointer-events: none; }
+        #action-buttons { position: absolute; bottom: 30px; right: 30px; display: flex; gap: 15px; z-index: 10; }
+        .game-btn { width: 80px; height: 80px; border-radius: 50%; border: 3px solid #fff; color: white; font-weight: bold; font-size: 13px; text-transform: uppercase; background: rgba(0,0,0,0.6); display: flex; justify-content: center; align-items: center; cursor: pointer; opacity: 0.3; }
+        .active-kill { opacity: 1 !important; background: #e74c3c !important; }
+        .active-sabotage { opacity: 1 !important; background: #9b59b6 !important; }
+        #joystick-container { position: absolute; bottom: 40px; left: 40px; width: 130px; height: 130px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; display: flex; justify-content: center; align-items: center; z-index: 10; }
+        #joystick-knob { width: 45px; height: 45px; background: rgba(255,255,255,0.7); border-radius: 50%; position: absolute; }
+        #meeting-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(6,12,24,0.95); display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 100; color: white; }
+        #voters-list { display: flex; flex-direction: column; gap: 10px; width: 90%; max-width: 400px; margin-top: 20px; }
+        .voter-card { background: #1e272e; border: 2px solid #3d3d3d; padding: 10px 15px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; font-size: 16px; font-weight: bold; cursor: pointer; }
+        .voter-card.dead { opacity: 0.3; text-decoration: line-through; pointer-events: none; }
+        .bot-badge { width: 14px; height: 14px; border-radius: 50%; display: inline-block; margin-right: 8px; border: 1px solid #000; }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <canvas id="gameCanvas"></canvas>
+        <div class="hud-panel">
+            Роль: <span style="color: #e74c3c;">ПРЕДАТЕЛЬ</span><br>
+            Живых ботов: <span id="bots-count" style="color: #3498db;">5</span><br>
+            Саботажи: <span id="sabotage-count" style="color: #2ecc71;">0/3</span><br>
+            <span id="game-alert" style="color: #f1c40f;">Статус: Игра оптимизирована!</span>
+        </div>
+        <div id="joystick-container"><div id="joystick-knob"></div></div>
+        <div id="action-buttons">
+            <button class="game-btn" id="sabotage-btn">Саботаж</button>
+            <button class="game-btn" id="kill-btn">Убить</button>
+        </div>
+        <div id="meeting-screen">
+            <div style="font-size:28px; color:#f1c40f; font-weight:bold;">📢 СОБРАНИЕ!</div>
+            <div id="meeting-subtitle" style="color:#b2bec3;">Обнаружено тело!</div>
+            <div id="voters-list"></div>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
+        const VIRTUAL_WIDTH = 1280, VIRTUAL_HEIGHT = 720, MAP_SIZE = 5000;
+        const player = { x: MAP_SIZE/2, y: MAP_SIZE/2, radius: 24, speed: 455, vx: 0, vy: 0, color: '#e74c3c', name: 'Вы' };
+        
+        let killCooldown = 0, maxKillCooldown = 10, gameActive = true, inMeeting = false, activeSabotage = false;
+        let repairedSabotages = 0, sabotageTimer = 0, targetBot = null;
+
+        const targets = {
+            generator: { x: 2500, y: 2500, radius: 60, color: '#9b59b6', name: 'Генератор' },
+            taskA: { x: 800, y: 800, radius: 45, color: '#f1c40f', name: 'Верхний отсек' },
+            taskB: { x: 4200, y: 4200, radius: 45, color: '#f1c40f', name: 'Нижний отсек' }
+        };
+        const walls = [
+            { x: 2200, y: 2100, width: 600, height: 40 }, { x: 2200, y: 2900, width: 600, height: 40 },
+            { x: 500, y: 1200, width: 800, height: 50 }, { x: 3500, y: 3500, width: 1000, height: 50 }
+        ];
+        const bots = [], deadBodies = [];
+        const colors = ['#3498db', '#2ecc71', '#f39c12', '#1abc9c', '#ffffff'];
+        const names = ['Синий', 'Зеленый', 'Оранжевый', 'Бирюзовый', 'Белый'];
+
+        for (let i = 0; i < 5; i++) {
+            bots.push({ id: i, name: names[i], x: 1500 + Math.random() * 2000, y: 1500 + Math.random() * 2000, radius: 24, speed: 240, color: colors[i], isAlive: true, targetPoint: null, state: 'WANDERING' });
+        }
+              const joystick = document.getElementById('joystick-container'), knob = document.getElementById('joystick-knob');
+        let joyVec = { x: 0, y: 0 }, isJoy = false;
+        const keys = { w:0, a:0, s:0, d:0, ц:0, ф:0, ы:0, в:0 };
+
+        function resize() {
+            const scale = Math.min(window.innerWidth / VIRTUAL_WIDTH, window.innerHeight / VIRTUAL_HEIGHT);
+            canvas.width = VIRTUAL_WIDTH * scale; canvas.height = VIRTUAL_HEIGHT * scale;
+            ctx.scale(scale, scale);
+        }
+        window.addEventListener('resize', resize); resize();
+
+        joystick.addEventListener('pointerdown', (e) => { isJoy = true; moveJoy(e); });
+        window.addEventListener('pointermove', (e) => { if (isJoy) moveJoy(e); });
+        window.addEventListener('pointerup', () => { isJoy = false; joyVec = {x:0, y:0}; knob.style.transform = 'translate(0px,0px)'; });
+
+        function moveJoy(e) {
+            const r = joystick.getBoundingClientRect(), cx = r.left + r.width/2, cy = r.top + r.height/2;
+            let dx = e.clientX - cx, dy = e.clientY - cy, dist = Math.hypot(dx, dy), maxR = r.width/2;
+            if (dist > maxR) { dx = (dx/dist)*maxR; dy = (dy/dist)*maxR; }
+            knob.style.transform = `translate(${dx}px,${dy}px)`;
+            joyVec = { x: dx/maxR, y: dy/maxR };
+        }
+
+        window.addEventListener('keydown', (e) => { let k = e.key.toLowerCase(); if (k in keys) keys[k] = 1; });
+        window.addEventListener('keyup', (e) => { let k = e.key.toLowerCase(); if (k in keys) keys[k] = 0; });
+
+        function checkWall(cx, cy, radius) {
+            return walls.some(w => {
+                let clX = Math.max(w.x, Math.min(cx, w.x + w.width)), clY = Math.max(w.y, Math.min(cy, w.y + w.height));
+                return Math.hypot(cx - clX, cy - clY) < radius;
+            });
+        }
+
+        function updateBots(dt) {
+            bots.forEach(b => {
+                if (!b.isAlive) return;
+                deadBodies.forEach(body => { if (Math.hypot(b.x - body.x, b.y - body.y) < 250) startMeeting(`${b.name} нашел труп!`); });
+                
+                if (activeSabotage && b.state !== 'SABOTAGE') { b.state = 'SABOTAGE'; b.targetPoint = targets.generator; }
+                else if (!activeSabotage && b.state === 'SABOTAGE') { b.state = 'WANDERING'; b.targetPoint = null; }
+
+                if (!b.targetPoint) {
+                    let arr = Object.values(targets); b.targetPoint = arr[Math.floor(Math.random() * arr.length)];
+                }
+
+                let dx = b.targetPoint.x - b.x, dy = b.targetPoint.y - b.y, dist = Math.hypot(dx, dy);
+                if (dist > 20) {
+                    let vx = (dx/dist)*b.speed, vy = (dy/dist)*b.speed;
+                    if (!checkWall(b.x + vx*dt, b.y, b.radius)) b.x += vx*dt;
+                    if (!checkWall(b.x, b.y + vy*dt, b.radius)) b.y += vy*dt;
+                } else if (b.state === 'SABOTAGE') {
+                    sabotageTimer += dt;
+                    document.getElementById('game-alert').innerText = 'Боты чинят генератор!';
+                    if (sabotageTimer >= 3.5) { activeSabotage = false; sabotageTimer = 0; repairedSabotages++; document.getElementById('sabotage-count').innerText = `${repairedSabotages}/3`; checkEnd(); }
+                } else { b.targetPoint = null; }
+            });
+        }
+                const btnKill = document.getElementById('kill-btn'), btnSab = document.getElementById('sabotage-btn');
+
+        function checkInteractions() {
+            if (!gameActive || inMeeting) return;
+            targetBot = null; let minDist = Infinity;
+            bots.forEach(b => {
+                if (!b.isAlive) return;
+                let d = Math.hypot(player.x - b.x, player.y - b.y);
+                if (d < minDist) { minDist = d; targetBot = b; }
+            });
+            if (targetBot && minDist < 95 && killCooldown <= 0) { btnKill.classList.add('active-kill'); btnKill.innerText = "Убить"; }
+            else { btnKill.classList.remove('active-kill'); btnKill.innerText = killCooldown > 0 ? Math.ceil(killCooldown)+"s" : "Убить"; targetBot = null; }
+            
+            if (!activeSabotage) btnSab.classList.add('active-sabotage'); else btnSab.classList.remove('active-sabotage');
+            deadBodies.forEach(b => { if (Math.hypot(player.x - b.x, player.y - b.y) < 60) startMeeting("Вы зарепортили тело!"); });
+        }
+
+        btnKill.addEventListener('click', () => {
+            if (targetBot && killCooldown <= 0) {
+                targetBot.isAlive = false; deadBodies.push({ x: targetBot.x, y: targetBot.y, color: targetBot.color });
+                killCooldown = maxKillCooldown; document.getElementById('bots-count').innerText = bots.filter(b=>b.isAlive).length; checkEnd();
+            }
+        });
+        btnSab.addEventListener('click', () => { if (!activeSabotage && !inMeeting) { activeSabotage = true; sabotageTimer = 0; } });
+
+        function startMeeting(txt) {
+            inMeeting = true; isJoy = false; document.getElementById('meeting-subtitle').innerText = txt;
+            const container = document.getElementById('voters-list'); container.innerHTML = '';
+            bots.forEach(b => {
+                let card = document.createElement('div'); card.className = `voter-card ${b.isAlive ? '' : 'dead'}`;
+                card.innerHTML = `<span><span class="bot-badge" style="background:${b.color}"></span>${b.name}</span><span>${b.isAlive?'Выгнать':'-'}</span>`;
+                if (b.isAlive) card.onclick = () => vote(b.id);
+                container.appendChild(card);
+            });
+            document.getElementById('meeting-screen').style.display = 'flex';
+        }
+
+        function vote(id) {
+            document.getElementById('meeting-screen').style.display = 'none'; inMeeting = false;
+            let votes = { 'player': 0 }; bots.forEach(b => { if(b.isAlive) votes[b.id] = 0; });
+            votes[id]++;
+            bots.forEach(b => { if (b.isAlive) { let p = bots.filter(x=>x.isAlive && x.id!==b.id).map(x=>x.id); p.push('player'); votes[p[Math.floor(Math.random()*p.length)]]++; } });
+            
+            let maxV = -1, kicked = null;
+            for (let k in votes) { if (votes[k] > maxV) { maxV = votes[k]; kicked = k; } }
+            if (kicked === 'player') { gameActive = false; document.getElementById('game-alert').innerText = 'Вас раскрыли и выкинули!'; }
+            else {
+                let b = bots.find(x => x.id == kicked); b.isAlive = false;
+                document.getElementById('bots-count').innerText = bots.filter(x=>x.isAlive).length;
+                player.x = MAP_SIZE/2; player.y = MAP_SIZE/2;
+                bots.forEach(x => { x.x = MAP_SIZE/2+Math.random()*100-50; x.y = MAP_SIZE/2+Math.random()*100-50; x.targetPoint = null; });
+                deadBodies.length = 0; killCooldown = 0; checkEnd();
+            }
+        }
+
+        function checkEnd() {
+            let alive = bots.filter(b => b.isAlive).length;
+            if (alive === 0) { gameActive = false; document.getElementById('game-alert').innerText = 'ПОБЕДА ПРЕДАТЕЛЯ!'; }
+            else if (repairedSabotages >= requiredSabotagesToWin) { gameActive = false; document.getElementById('game-alert').innerText = 'ПОРАЖЕНИЕ! Саботажи починены!'; }
+        }
+
+        let lastTime = performance.now();
+        function loop(now) {
+            const dt = Math.min((now - lastTime) / 1000, 0.1); lastTime = now;
+            if (gameActive && !inMeeting) {
+                if (killCooldown > 0) killCooldown -= dt;
+                let mx = 0, my = 0;
+                if (isJoy) { mx = joyVec.x; my = joyVec.y; }
+                else {
+                    if (keys.w || keys.ц) my = -1; if (keys.s || keys.ы) my = 1;
+                    if (keys.a || keys.ф) mx = -1; if (keys.d || keys.в) mx = 1;
+                    let l = Math.hypot(mx, my); if (l > 0) { mx /= l; my /= l; }
+                }
+                player.vx = mx * player.speed; player.vy = my * player.speed;
+                if (player.x + player.vx*dt > player.radius && player.x + player.vx*dt < MAP_SIZE - player.radius && !checkWall(player.x + player.vx*dt, player.y, player.radius)) player.x += player.vx*dt;
+                if (player.y + player.vy*dt > player.radius && player.y + player.vy*dt < MAP_SIZE - player.radius && !checkWall(player.x, player.y + player.vy*dt, player.radius)) player.y += player.vy*dt;
+                updateBots(dt); checkInteractions();
+            }
+
+            ctx.clearRect(0, 0, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+            ctx.save(); ctx.translate(VIRTUAL_WIDTH/2 - player.x, VIRTUAL_HEIGHT/2 - player.y);
+            ctx.fillStyle = '#161d24'; ctx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
+            ctx.strokeStyle = '#232d38'; ctx.lineWidth = 2;
+            for (let i = 0; i <= MAP_SIZE; i += 200) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,MAP_SIZE); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(MAP_SIZE,i); ctx.stroke(); }
+            for (let k in targets) { let t = targets[k]; ctx.fillStyle = t.color; ctx.beginPath(); ctx.arc(t.x, t.y, t.radius, 0, Math.PI*2); ctx.fill(); }
+            ctx.fillStyle = '#57606f'; walls.forEach(w => ctx.fillRect(w.x, w.y, w.width, w.height));
+            deadBodies.forEach(b => { ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(b.x, b.y, player.radius, Math.PI, 0); ctx.fill(); ctx.fillStyle = '#fff'; ctx.fillRect(b.x-3, b.y-10, 6, 10); });
+            bots.forEach(b => { if (!b.isAlive) return; ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2); ctx.fill(); ctx.fillStyle = '#dff9fb'; ctx.beginPath(); ctx.ellipse(b.x+6, b.y-4, 8, 4, 0, 0, Math.PI*2); ctx.fill(); });
+            ctx.fillStyle = player.color; ctx.beginPath(); ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#dff9fb'; ctx.beginPath(); ctx.ellipse(player.x+6, player.y-4, 8, 4, 0, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+
+            if (!inMeeting) {
+                const rS = 140, rX = VIRTUAL_WIDTH - rS - 20, rY = 20;
+                ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(rX, rY, rS, rS);
+                ctx.fillStyle = '#e74c3c'; ctx.beginPath(); ctx.arc(rX + (player.x/MAP_SIZE)*rS, rY + (player.y/MAP_SIZE)*rS, 3, 0, Math.PI*2); ctx.fill();
+                bots.forEach(b => { if (b.isAlive) { ctx.fillStyle = '#3498db'; ctx.beginPath(); ctx.arc(rX + (b.x/MAP_SIZE)*rS, rY + (b.y/MAP_SIZE)*rS, 2, 0, Math.PI*2); ctx.fill(); } });
+            }
+            requestAnimationFrame(loop);
+        }
+        requestAnimationFrame(loop);
+    </script>
+</body>
+</html>
